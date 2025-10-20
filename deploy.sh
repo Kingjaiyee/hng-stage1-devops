@@ -35,7 +35,7 @@ SSH_KEY=""
 APP_PORT=""         # internal container/app port (e.g., 8000)
 REPO_DIR=""         # local repo directory name (derived)
 PROJECT_NAME=""     # derived from repo name (alnum/hyphen only)
-REMOTE_DIR=""       # remote deployment dir: ~/apps/$PROJECT_NAME
+REMOTE_DIR=""       # relative to remote $HOME (e.g., apps/myapp)
 CLEANUP_MODE="false"
 
 # ---------- Helpers ----------
@@ -138,11 +138,11 @@ collect_inputs() {
 
   REPO_DIR="$(extract_repo_dir "$GIT_URL")"
   PROJECT_NAME="$(normalize_project_name "$REPO_DIR")"
-  REMOTE_DIR="\$HOME/apps/${PROJECT_NAME}"
+  REMOTE_DIR="apps/${PROJECT_NAME}"   # <— relative path under remote $HOME
 
   log "Repo dir: $REPO_DIR"
   log "Project name: $PROJECT_NAME"
-  log "Remote deploy dir: $REMOTE_DIR"
+  log "Remote deploy dir: ~/$REMOTE_DIR"
 }
 
 # ---------- Git clone / update ----------
@@ -226,9 +226,12 @@ REMOTE_EOF
 
 # ---------- Transfer project ----------
 transfer_project() {
-  log "Transferring project files to remote: $REMOTE_DIR ..."
-  # rsync preferred for speed and idempotency
-  eval "$(rsync_base)" . "${SSH_USER}@${SSH_HOST}:${REMOTE_DIR}/"
+  log "Transferring project files to remote: ~/${REMOTE_DIR} ..."
+  # ensure it exists under the *remote* user's HOME
+  $(ssh_base) "mkdir -p ~/${REMOTE_DIR}"
+  # rsync preferred for speed and idempotency — use :~ prefix to resolve on remote
+  log "DEBUG: will rsync to ${SSH_USER}@${SSH_HOST}:~/${REMOTE_DIR}/"
+  eval "$(rsync_base)" . "${SSH_USER}@${SSH_HOST}:~/${REMOTE_DIR}/"
   log "Transfer complete."
 }
 
@@ -244,7 +247,7 @@ remote_deploy() {
   # Compose the remote script with variable expansion
   RSCRIPT=$(cat <<EOF
 set -Eeuo pipefail
-cd ${REMOTE_DIR}
+cd ~/${REMOTE_DIR}
 
 # Decide compose vs Dockerfile
 USE_COMPOSE="no"
@@ -272,7 +275,7 @@ fi
 
 # Simple health checks
 sleep 3
-docker ps --format 'table {{.Names}}\t{{.Status}}'
+docker ps --format 'table {{.Names}}\\t{{.Status}}'
 
 # Nginx reverse proxy config
 SITE_FILE="${NGINX_SITE}"
@@ -337,7 +340,7 @@ remote_cleanup() {
 
   $(ssh_base) "bash -s" <<REMOTE_EOF
 set -Eeuo pipefail
-cd "${REMOTE_DIR}" 2>/dev/null || true
+cd ~/"${REMOTE_DIR}" 2>/dev/null || true
 if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
   (docker compose down || docker-compose down) || true
 fi
@@ -346,7 +349,7 @@ if docker ps -a --format '{{.Names}}' | grep -q '^${CONTAINER_NAME}\$'; then
 fi
 sudo rm -f "${NGINX_LINK}" "${NGINX_SITE}" || true
 sudo nginx -t && sudo systemctl reload nginx || true
-rm -rf "${REMOTE_DIR}" || true
+rm -rf ~/"${REMOTE_DIR}" || true
 echo "Cleanup complete."
 REMOTE_EOF
   log "Cleanup finished."
