@@ -138,7 +138,7 @@ collect_inputs() {
 
   REPO_DIR="$(extract_repo_dir "$GIT_URL")"
   PROJECT_NAME="$(normalize_project_name "$REPO_DIR")"
-  REMOTE_DIR="apps/${PROJECT_NAME}"   # <— relative path under remote $HOME
+  REMOTE_DIR="apps/${PROJECT_NAME}"   # relative path under remote $HOME
 
   log "Repo dir: $REPO_DIR"
   log "Project name: $PROJECT_NAME"
@@ -184,7 +184,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 # Packages & updates
 sudo apt-get update -y
-sudo apt-get install -y ca-certificates curl gnupg lsb-release
+sudo apt-get install -y ca-certificates curl gnupg lsb-release gettext-base
 
 # Install Docker (if missing)
 if ! command -v docker >/dev/null 2>&1; then
@@ -227,9 +227,7 @@ REMOTE_EOF
 # ---------- Transfer project ----------
 transfer_project() {
   log "Transferring project files to remote: ~/${REMOTE_DIR} ..."
-  # ensure it exists under the *remote* user's HOME
   $(ssh_base) "mkdir -p ~/${REMOTE_DIR}"
-  # rsync preferred for speed and idempotency — use :~ prefix to resolve on remote
   log "DEBUG: will rsync to ${SSH_USER}@${SSH_HOST}:~/${REMOTE_DIR}/"
   eval "$(rsync_base)" . "${SSH_USER}@${SSH_HOST}:~/${REMOTE_DIR}/"
   log "Transfer complete."
@@ -238,13 +236,12 @@ transfer_project() {
 # ---------- Remote deployment ----------
 remote_deploy() {
   log "Deploying on remote host..."
-  # Create unique container name (nginx upstream & container)
   CONTAINER_NAME="${PROJECT_NAME}_app"
   NGINX_SITE="/etc/nginx/sites-available/${PROJECT_NAME}.conf"
   NGINX_LINK="/etc/nginx/sites-enabled/${PROJECT_NAME}.conf"
   APP_PORT_VAL="$APP_PORT"
 
-  # Compose the remote script with variable expansion
+  # Build the remote script (expand local vars like ${REMOTE_DIR}, keep remote vars escaped)
   RSCRIPT=$(cat <<EOF
 set -Eeuo pipefail
 cd ~/${REMOTE_DIR}
@@ -269,7 +266,6 @@ if [ "\$USE_COMPOSE" = "yes" ]; then
   (docker compose up -d --build || docker-compose up -d --build)
 else
   docker build -t ${PROJECT_NAME}:latest .
-  # Run app bound to localhost only; Nginx will proxy from :80
   docker run -d --restart unless-stopped --name ${CONTAINER_NAME} -p 127.0.0.1:${APP_PORT_VAL}:${APP_PORT_VAL} ${PROJECT_NAME}:latest
 fi
 
@@ -277,9 +273,9 @@ fi
 sleep 3
 docker ps --format 'table {{.Names}}\\t{{.Status}}'
 
-# Nginx reverse proxy config
+# Nginx reverse proxy config (quoted heredoc + envsubst only for \$APP_PORT_VAL)
 SITE_FILE="${NGINX_SITE}"
-cat <<NGINX_CONF | sudo tee "\$SITE_FILE" >/dev/null
+cat <<'NGINX_CONF' | APP_PORT_VAL=${APP_PORT_VAL} envsubst '\$APP_PORT_VAL' | sudo tee "\$SITE_FILE" >/dev/null
 server {
     listen 80;
     server_name _;
@@ -289,7 +285,7 @@ server {
     proxy_read_timeout 90s;
 
     location / {
-        proxy_pass http://127.0.0.1:${APP_PORT_VAL};
+        proxy_pass http://127.0.0.1:\$APP_PORT_VAL;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -297,7 +293,6 @@ server {
     }
 
     # Placeholder for SSL: replace with Certbot config later.
-    # To enable SSL with certbot:
     # sudo apt-get install -y certbot python3-certbot-nginx
     # sudo certbot --nginx -d your.domain.com
 }
